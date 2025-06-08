@@ -9,6 +9,7 @@ import numpy as np
 import requests
 import soundcard as sc
 import websockets
+from websockets.datastructures import Headers
 from mss import mss
 from PIL import Image
 from asyncio_throttle import Throttler
@@ -145,6 +146,9 @@ def _soundcard_record_loop(mic_device, queue: asyncio.Queue, stop_event: threadi
 
 async def capture_and_send_video(uri, stop_event: threading.Event, pause_event: asyncio.Event):
     logger.info(f"Starting video stream to {uri}")
+
+    auth_headers = Headers({"X-Auth-Token": cfg.WEBSOCKET_SECRET_KEY})
+
     is_paused_logged = False
     while not stop_event.is_set():
         if pause_event.is_set():
@@ -159,7 +163,7 @@ async def capture_and_send_video(uri, stop_event: threading.Event, pause_event: 
             is_paused_logged = False
 
         try:
-            async with websockets.connect(uri, ping_interval=10, ping_timeout=10) as websocket:
+            async with websockets.connect(uri, ping_interval=10, ping_timeout=10, extra_headers=auth_headers) as websocket:
                 logger.info("Video WebSocket connected (or reconnected).")
                 with mss() as sct:
                     monitor = sct.monitors[cfg.MONITOR_NUM]
@@ -229,6 +233,9 @@ def _encode_frame(img_bytes, quality) -> io.BytesIO:
 async def send_audio(uri, queue: asyncio.Queue, stop_event: threading.Event, pause_event: asyncio.Event):
     logger.info(f"Starting audio sending task to {uri}")
     throttler = Throttler(rate_limit=(1 / cfg.AUDIO_CHUNK_DURATION) * 1.1, period=1.0)
+
+    auth_headers = Headers({"X-Auth-Token": cfg.WEBSOCKET_SECRET_KEY})
+
     is_paused_logged = False
 
     while not stop_event.is_set():
@@ -244,7 +251,7 @@ async def send_audio(uri, queue: asyncio.Queue, stop_event: threading.Event, pau
             is_paused_logged = False
 
         try:
-            async with websockets.connect(uri, ping_interval=10, ping_timeout=10) as websocket:
+            async with websockets.connect(uri, ping_interval=10, ping_timeout=10, extra_headers=auth_headers) as websocket:
                 logger.info("Audio WebSocket connected (or reconnected).")
                 while not stop_event.is_set():
                     if pause_event.is_set():

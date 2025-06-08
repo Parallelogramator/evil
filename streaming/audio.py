@@ -1,11 +1,12 @@
 # streaming/audio.py
 import asyncio
 import logging
+import secrets
 import time
 from typing import List
 
 import numpy as np
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, status
 
 import config
 import streaming.asr as asr
@@ -19,40 +20,53 @@ router = APIRouter()
 browser_audio_clients: List[WebSocket] = []
 audio_buffer = np.array([], dtype=np.float32)
 audio_buffer_lock = asyncio.Lock()
-# Убрали audio_stream_obj
+
+
+async def verify_ws_token(websocket: WebSocket):
+    """
+    Зависимость для проверки токена аутентификации в заголовках WebSocket.
+    """
+    token = websocket.headers.get("x-auth-token")
+    if not token:
+        logger.warning(f"WS connection from {websocket.client} rejected: Missing X-Auth-Token header.")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    # Используем secrets.compare_digest для защиты от атак по времени
+    if not secrets.compare_digest(token, config.WEBSOCKET_SECRET_KEY):
+        logger.warning(f"WS connection from {websocket.client} rejected: Invalid X-Auth-Token.")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    # Если токен верный, функция просто завершается, и FastAPI продолжает обработку
+    logger.info(f"WS connection from {websocket.client} authenticated successfully.")
+
 
 # --- WebSocket для приема аудио от Источника ---
 @router.websocket("/ws/source/audio")
-async def websocket_source_audio_endpoint(websocket: WebSocket):
+async def websocket_source_audio_endpoint(websocket: WebSocket, dependencies=[Depends(verify_ws_token)]):
     """Принимает сырые float32 аудио байты от источника и добавляет в буфер."""
     global audio_buffer
     await websocket.accept()
-    logger.info(f"Audio Source connected: {websocket.client}")
+    logger.info(f"Authenticated Audio Source connected: {websocket.client}")
     try:
         while True:
             audio_bytes = await websocket.receive_bytes()
             if audio_bytes:
                 try:
-                    # Преобразуем байты обратно в numpy массив float32
-                    # Важно: источник должен слать именно float32
                     new_samples = np.frombuffer(audio_bytes, dtype=np.float32)
-                    # Добавляем в буфер асинхронно
                     async with audio_buffer_lock:
-                         audio_buffer = np.append(audio_buffer, new_samples)
-                    # logger.debug(f"Received audio samples: {len(new_samples)}. Buffer size: {len(audio_buffer)}")
+                        audio_buffer = np.append(audio_buffer, new_samples)
                 except Exception as e:
                     logger.error(f"Error processing received audio bytes: {e}")
 
     except WebSocketDisconnect:
-        logger.info(f"Audio Source disconnected: {websocket.client}")
+        logger.info(f"Authenticated Audio Source disconnected: {websocket.client}")
     except Exception as e:
         logger.error(f"Error in source audio websocket {websocket.client}: {e}", exc_info=True)
     finally:
-        logger.info(f"Audio Source connection closed: {websocket.client}")
-        # Очистить буфер при отсоединении источника?
-        # async with audio_buffer_lock:
-        #     audio_buffer = np.array([], dtype=np.float32)
-        # logger.info("Audio buffer cleared on source disconnect.")
+        logger.info(f"Authenticated Audio Source connection closed: {websocket.client}")
+
 
 
 # --- Функция обработки аудио буфера и отправки текста браузерам ---

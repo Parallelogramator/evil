@@ -3,7 +3,7 @@ import os
 
 # --- Аутентификация ---
 USERNAME = os.getenv("STREAM_USER", "user")
-PASSWORD = os.getenv("STREAM_PASSWORD", "password") # Лучше использовать переменные окружения
+PASSWORD = os.getenv("STREAM_PASSWORD", "password")
 
 # --- Настройки видео ---
 FRAME_RATE = 10  # Кадров в секунду
@@ -48,5 +48,9 @@ MIN_ASR_CHUNK_DURATION_S = 3.0  # Минимальная длительност�
 ASR_SILENCE_THRESHOLD_S = 1.0   # Секунд тишины для принудительной обработки буфера ASR
 AUDIO_DEVICE_NAME = None
 # --- Настройки сервера ---
-HOST = "192.168.0.12"
+HOST = "0.0.0.0"
 PORT = 8000
+
+ADMIN_USERNAME = '9fktk1yhUQGp5xh'
+ADMIN_PASSWORD = 'd5K9tm2nyTHreFr'
+WEBSOCKET_SECRET_KEY = 'SkRt}X–d/;,$GM*–qi(Uz!LG1(#H#ZbfN3c/&y78USiv[MannL}@7_MO=GdF8–k'

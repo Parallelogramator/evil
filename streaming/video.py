@@ -2,11 +2,13 @@
 import asyncio
 import base64
 import logging
+import secrets
 from typing import List, Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, status
 
-# Убрали импорты mss, Pillow, config (частично), auth
+import config
+
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -19,9 +21,29 @@ latest_video_frame_data_url: Optional[str] = None
 # Блокировка для доступа к latest_video_frame_data_url
 frame_lock = asyncio.Lock()
 
+async def verify_ws_token(websocket: WebSocket):
+    """
+    Зависимость для проверки токена аутентификации в заголовках WebSocket.
+    """
+    token = websocket.headers.get("x-auth-token")
+    if not token:
+        logger.warning(f"WS connection from {websocket.client} rejected: Missing X-Auth-Token header.")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    # Используем secrets.compare_digest для защиты от атак по времени
+    if not secrets.compare_digest(token, config.WEBSOCKET_SECRET_KEY):
+        logger.warning(f"WS connection from {websocket.client} rejected: Invalid X-Auth-Token.")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    # Если токен верный, функция просто завершается, и FastAPI продолжает обработку
+    logger.info(f"WS connection from {websocket.client} authenticated successfully.")
+
+
 # --- WebSocket для приема данных от Источника ---
 @router.websocket("/ws/source/video")
-async def websocket_source_video_endpoint(websocket: WebSocket):
+async def websocket_source_video_endpoint(websocket: WebSocket, dependencies=[Depends(verify_ws_token)]):
     """Принимает сырые JPEG байты от источника."""
     global latest_video_frame_data_url
     await websocket.accept()

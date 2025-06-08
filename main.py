@@ -1,12 +1,14 @@
 # main.py
 import asyncio
 import logging
+import secrets
 import sys
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, Request, Form
+from fastapi import FastAPI, Request, Form, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 import config
 from streaming import audio, video, asr
@@ -22,11 +24,28 @@ logger = logging.getLogger(__name__)
 data = {'status': 'start', 'first_str': '', 'second_str': ''}
 
 
+security = HTTPBasic()
+
+def get_current_username(credentials: HTTPBasicCredentials = Depends(security)):
+    """
+    Зависимость для проверки логина и пароля.
+    Использует secrets.compare_digest для защиты от атак по времени.
+    """
+    correct_username = secrets.compare_digest(credentials.username, config.ADMIN_USERNAME)
+    correct_password = secrets.compare_digest(credentials.password, config.ADMIN_PASSWORD)
+    if not (correct_username and correct_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Lifespan: Starting up...")
     lifespan.background_tasks = set()
-    # Убрали lifespan.audio_stream
 
     # 1. Инициализация ASR модели
     if not asr.init_asr_model():
@@ -69,7 +88,7 @@ app.include_router(video.router) # Включает /ws/source/video и /ws/clie
 app.include_router(audio.router) # Включает /ws/source/audio и /ws/client/audio
 
 @app.get("/", response_class=HTMLResponse)
-async def get_index(request: Request):
+async def get_index(request: Request, username: str = Depends(get_current_username)):
     logger.info(f"Serving index.html to {request.client.host}")
     return FileResponse("index.html")
 
@@ -87,7 +106,7 @@ async def get_status():
 
 
 @app.post("/update")
-async def post_text(first: str = Form(...), second: str = Form(...), status: str = Form('changed')):
+async def post_text(first: str = Form(...), second: str = Form(...), status: str = Form('changed'), username: str = Depends(get_current_username)):
     data["status"] = 'changed'
     if first == data['first_str'] and second == data['second_str']:
         data["status"] = 'unchanged'

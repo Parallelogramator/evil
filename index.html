@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="ru"> <!-- Изменен язык на русский для соответствия -->
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Stream & Transcript (Receiver)</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding-bottom: 50px; }
+        #video-container { margin-bottom: 20px; min-width: 320px; min-height: 180px; border: 1px solid #ccc; background-color: #f0f0f0; }
+        #video-stream { max-width: 90vw; max-height: 70vh; display: block; }
+        #transcript-container { width: 80%; max-width: 800px; height: 200px; border: 1px solid #ccc; overflow-y: scroll; padding: 10px; background-color: #f9f9f9; }
+        #status { margin-top: 10px; font-style: italic; }
+        .error { color: red; font-weight: bold; }
+
+        #input-grid-section {
+            margin-top: 30px;
+            padding: 20px;
+            border: 1px solid #b0b0b0;
+            border-radius: 8px;
+            background-color: #f7f7f7;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: auto;
+            max-width: 90%;
+        }
+        .input-grid-row {
+            display: flex;
+            flex-wrap: nowrap;
+            margin-bottom: 8px;
+        }
+        .input-grid-row input {
+            width: 30px;
+            height: 30px;
+            text-align: center;
+            font-size: 16px;
+            font-family: monospace;
+            border: 1px solid #999;
+            margin-right: 4px;
+            padding: 0;
+            box-sizing: border-box;
+            flex-shrink: 0;
+        }
+        .input-grid-row input:last-child {
+            margin-right: 0;
+        }
+        #input-controls {
+            margin-top: 15px;
+        }
+        #input-controls button {
+            margin: 0 10px;
+            padding: 10px 20px;
+            font-size: 14px;
+            cursor: pointer;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+            min-width: 120px; /* Для выравнивания кнопок с разным текстом */
+        }
+        #send-text-button {
+            background-color: #4CAF50;
+            color: white;
+            border-color: #4CAF50;
+        }
+        #stop-signal-button {
+            background-color: #f44336;
+            color: white;
+            border-color: #f44336;
+        }
+        /* Стиль для активной кнопки "Stop" */
+        #stop-signal-button.active-stop {
+            background-color: #d32f2f; /* Темнее красный */
+            border-color: #b71c1c;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
+        }
+        #update-status-message {
+            margin-top: 15px;
+            font-style: italic;
+            min-height: 1.2em;
+            color: #333;
+            text-align: center;
+        }
+        #update-status-message.success {
+            color: green;
+        }
+        #update-status-message.error {
+            color: red;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Live Stream & Transcript (Receiver)</h1>
+
+    <div id="video-container">
+        <img id="video-stream" alt="Ожидание видеопотока...">
+    </div>
+
+    <h2>Транскрипция:</h2>
+    <div id="transcript-container">
+        <!-- Текст будет добавляться сюда параграфами -->
+    </div>
+
+    <div id="status">Подключение...</div>
+
+    <!-- Input Grid Section -->
+    <div id="input-grid-section">
+        <h3>Обновить текст дисплея (16x2):</h3>
+        <div id="grid-row-1" class="input-grid-row">
+            <!-- JS will populate this -->
+        </div>
+        <div id="grid-row-2" class="input-grid-row">
+            <!-- JS will populate this -->
+        </div>
+        <div id="input-controls">
+            <button id="send-text-button">Отправить текст</button>
+            <button id="stop-signal-button">Сигнал Стоп</button>
+        </div>
+        <div id="update-status-message"></div>
+    </div>
+
+    <script>
+        const videoStream = document.getElementById('video-stream');
+        const transcriptContainer = document.getElementById('transcript-container');
+        const statusDiv = document.getElementById('status');
+
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsHost = window.location.hostname + ':' + window.location.port;
+
+        const videoWsUrl = `${wsProtocol}//${wsHost}/ws/client/video`;
+        const audioWsUrl = `${wsProtocol}//${wsHost}/ws/client/audio`;
+
+        let videoWs;
+        let audioWs;
+        let reconnectAttemptsVideo = 0;
+        let reconnectAttemptsAudio = 0;
+        const maxReconnectAttempts = 5;
+        const reconnectDelay = 3000;
+
+        function updateStatus(message, isError = false) {
+            console.log(message);
+            statusDiv.textContent = message;
+            statusDiv.className = isError ? 'error' : '';
+        }
+
+        function connectWebSocket(url, onOpen, onMessage, onClose, onError, attemptCounterRef) {
+             const ws = new WebSocket(url);
+             ws.onopen = () => {
+                 attemptCounterRef.count = 0;
+                 onOpen(ws);
+             };
+             ws.onmessage = onMessage;
+             ws.onclose = (event) => {
+                 console.warn(`WebSocket закрыт: ${url}`, event.code, event.reason);
+                 onClose(event);
+                 if (event.code !== 1000 && event.code !== 1008 && attemptCounterRef.count < maxReconnectAttempts) {
+                     attemptCounterRef.count++;
+                     updateStatus(`WebSocket отсоединен (${event.code}). Переподключение ${url.split('/').pop()} (${attemptCounterRef.count}/${maxReconnectAttempts})...`, true);
+                     setTimeout(() => connectWebSocket(url, onOpen, onMessage, onClose, onError, attemptCounterRef), reconnectDelay);
+                 } else if (attemptCounterRef.count >= maxReconnectAttempts) {
+                      updateStatus(`WebSocket отсоединен. Достигнуто макс. попыток переподключения для ${url.split('/').pop()}.`, true);
+                 } else {
+                      updateStatus(`WebSocket соединение закрыто (${event.code}) для ${url.split('/').pop()}.`);
+                 }
+             };
+             ws.onerror = (error) => {
+                 console.error(`WebSocket ошибка: ${url}`, error);
+                 onError(error);
+                 updateStatus(`WebSocket ошибка для ${url.split('/').pop()}. Проверьте консоль.`, true);
+             };
+             return ws;
+         }
+
+        function connectVideo() {
+            updateStatus('Подключение к видеопотоку...');
+            let attempts = { count: reconnectAttemptsVideo };
+            videoWs = connectWebSocket(
+                videoWsUrl,
+                (ws) => { updateStatus('Видеопоток подключен.'); },
+                (event) => {
+                    videoStream.src = event.data;
+                    if (!videoStream.src.startsWith('data:image/jpeg;base64,')) {
+                         console.warn("Получены не-JPEG данные по видео сокету:", event.data.substring(0, 100));
+                    }
+                },
+                (event) => {
+                    reconnectAttemptsVideo = attempts.count;
+                    videoStream.alt = 'Видеопоток отключен.';
+                    videoStream.src = '';
+                },
+                (error) => {
+                    videoStream.alt = 'Ошибка видеопотока.';
+                    updateStatus('Ошибка подключения к видеопотоку.', true);
+                },
+                attempts
+            );
+        }
+
+        function connectAudio() {
+            updateStatus('Подключение к транскрипции аудио...');
+            let attempts = { count: reconnectAttemptsAudio };
+             audioWs = connectWebSocket(
+                audioWsUrl,
+                (ws) => {
+                   updateStatus('Транскрипция аудио подключена.');
+                   if(videoWs && videoWs.readyState === WebSocket.OPEN) {
+                        setTimeout(() => updateStatus('Подключено.'), 500);
+                   }
+                },
+                (event) => {
+                    const newText = event.data;
+                    const newP = document.createElement('p');
+                    newP.textContent = newText;
+                    transcriptContainer.appendChild(newP);
+                    transcriptContainer.scrollTop = transcriptContainer.scrollHeight;
+                },
+                 (event) => { reconnectAttemptsAudio = attempts.count; },
+                (error) => { updateStatus('Ошибка подключения к транскрипции аудио.', true); },
+                attempts
+            );
+        }
+
+        connectVideo();
+        connectAudio();
+
+        // --- Логика сетки ввода ---
+        const gridRow1Container = document.getElementById('grid-row-1');
+        const gridRow2Container = document.getElementById('grid-row-2');
+        const sendTextButton = document.getElementById('send-text-button');
+        const stopSignalButton = document.getElementById('stop-signal-button');
+        const updateStatusMessageDiv = document.getElementById('update-status-message');
+
+        let isStopSignalActive = false; // Состояние кнопки "Stop"
+
+        function updateStopButtonVisualState() {
+            if (isStopSignalActive) {
+                stopSignalButton.classList.add('active-stop');
+                stopSignalButton.textContent = 'Стоп (АКТИВЕН)';
+            } else {
+                stopSignalButton.classList.remove('active-stop');
+                stopSignalButton.textContent = 'Сигнал Стоп';
+            }
+        }
+
+        function handleGridKeyDown(event) {
+            const input = event.target;
+            const currentRow = parseInt(input.dataset.row);
+            const currentCol = parseInt(input.dataset.col);
+            let targetRow = currentRow;
+            let targetCol = currentCol;
+            let preventDefault = true;
+            let moveFocus = false;
+
+            switch (event.key) {
+                case 'ArrowLeft':
+                    targetCol = (currentCol > 0) ? currentCol - 1 : 15;
+                    if (currentCol === 0) targetRow = (currentRow === 1) ? 2 : 1;
+                    moveFocus = true;
+                    break;
+                case 'ArrowRight':
+                    targetCol = (currentCol < 15) ? currentCol + 1 : 0;
+                    if (currentCol === 15) targetRow = (currentRow === 1) ? 2 : 1;
+                    moveFocus = true;
+                    break;
+                case 'ArrowUp':
+                    targetRow = (currentRow === 1) ? 2 : 1;
+                    moveFocus = true;
+                    break;
+                case 'ArrowDown':
+                    targetRow = (currentRow === 1) ? 2 : 1;
+                    moveFocus = true;
+                    break;
+                case 'Backspace':
+                    if (input.value) {
+                        input.value = '';
+                    } else {
+                        let prevTargetRow = currentRow;
+                        let prevTargetCol = currentCol - 1;
+                        if (prevTargetCol < 0) {
+                            prevTargetRow = (currentRow === 1) ? 2 : 1;
+                            prevTargetCol = 15;
+                        }
+                        const prevInput = document.getElementById(`input-r${prevTargetRow}-c${prevTargetCol}`);
+                        if (prevInput) {
+                            prevInput.focus();
+                            prevInput.value = '';
+                        }
+                    }
+                    break;
+                case 'Delete':
+                    if (input.value) {
+                        input.value = '';
+                    } else {
+                        let nextTargetRow = currentRow;
+                        let nextTargetCol = currentCol + 1;
+                        if (nextTargetCol > 15) {
+                            nextTargetRow = (currentRow === 1) ? 2 : 1;
+                            nextTargetCol = 0;
+                        }
+                        const nextInput = document.getElementById(`input-r${nextTargetRow}-c${nextTargetCol}`);
+                        if (nextInput) {
+                            nextInput.focus();
+                            nextInput.value = '';
+                        }
+                    }
+                    break;
+                default:
+                    preventDefault = false;
+                    break;
+            }
+
+            if (preventDefault) event.preventDefault();
+            if (moveFocus) {
+                const nextFocusInput = document.getElementById(`input-r${targetRow}-c${targetCol}`);
+                if (nextFocusInput) nextFocusInput.focus();
+            }
+        }
+
+        function createInputSquares(rowElement, rowNum) {
+            for (let i = 0; i < 16; i++) {
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.maxLength = 1;
+                input.id = `input-r${rowNum}-c${i}`;
+                input.dataset.row = rowNum;
+                input.dataset.col = i;
+                input.addEventListener('input', (e) => {
+                    if (e.target.value.length === 1) {
+                        const r = parseInt(e.target.dataset.row);
+                        const c = parseInt(e.target.dataset.col);
+                        let nextInputToFocus;
+                        if (c < 15) {
+                            nextInputToFocus = document.getElementById(`input-r${r}-c${c + 1}`);
+                        } else if (r === 1 && c === 15) {
+                            nextInputToFocus = document.getElementById(`input-r2-c0`);
+                        }
+                        if (nextInputToFocus) nextInputToFocus.focus();
+                    }
+                });
+                input.addEventListener('keydown', handleGridKeyDown);
+                rowElement.appendChild(input);
+            }
+        }
+
+        createInputSquares(gridRow1Container, 1);
+        createInputSquares(gridRow2Container, 2);
+        updateStopButtonVisualState(); // Инициализация вида кнопки "Stop"
+
+        function getRowText(rowNum) {
+            let text = '';
+            for (let i = 0; i < 16; i++) {
+                const input = document.getElementById(`input-r${rowNum}-c${i}`);
+                text += input.value || ' ';
+            }
+            return text;
+        }
+
+        async function sendDataToUpdateEndpoint(firstString, secondString, status) {
+            const formData = new FormData();
+            formData.append('first', firstString);
+            formData.append('second', secondString);
+            formData.append('status', status);
+
+            updateStatusMessageDiv.textContent = 'Отправка...';
+            updateStatusMessageDiv.className = '';
+
+            try {
+                const response = await fetch('/update', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (response.ok) {
+                    updateStatusMessageDiv.textContent = `Данные отправлены (Статус: ${status}). Ответ сервера: ${response.status}.`;
+                    updateStatusMessageDiv.className = 'success';
+                } else {
+                    const errorText = await response.text();
+                    updateStatusMessageDiv.textContent = `Ошибка отправки данных. Ответ сервера: ${response.status}: ${errorText}`;
+                    updateStatusMessageDiv.className = 'error';
+                    console.error('Ошибка отправки данных:', response.status, errorText);
+                }
+            } catch (error) {
+                updateStatusMessageDiv.textContent = `Сетевая ошибка: ${error.message}`;
+                updateStatusMessageDiv.className = 'error';
+                console.error('Сетевая ошибка:', error);
+            }
+        }
+
+        stopSignalButton.addEventListener('click', async () => {
+            isStopSignalActive = !isStopSignalActive;
+            updateStopButtonVisualState();
+
+            const firstString = getRowText(1);
+            const secondString = getRowText(2);
+
+            if (isStopSignalActive) {
+                // Активируем режим "Стоп"
+                await sendDataToUpdateEndpoint(firstString, secondString, 'stopped');
+                if (updateStatusMessageDiv.classList.contains('success')) { // Если отправка успешна
+                    updateStatusMessageDiv.textContent = "Режим СТОП АКТИВИРОВАН. Вывод на дисплей приостановлен.";
+                    // Очищаем поля при активации стопа
+                    for (let r = 1; r <= 2; r++) {
+                        for (let c = 0; c < 16; c++) {
+                            document.getElementById(`input-r${r}-c${c}`).value = '';
+                        }
+                    }
+                    document.getElementById('input-r1-c0').focus();
+                }
+            } else {
+                // Деактивируем режим "Стоп", отправляем текущий текст для обновления дисплея
+                await sendDataToUpdateEndpoint(firstString, secondString, 'changed');
+                 if (updateStatusMessageDiv.classList.contains('success')) {
+                    updateStatusMessageDiv.textContent = "Режим СТОП ДЕАКТИВИРОВАН. Дисплей возобновит/обновит вывод с текущим текстом.";
+                    // Поля не очищаем, их содержимое только что отправлено
+                }
+            }
+        });
+
+        sendTextButton.addEventListener('click', async () => {
+            const firstString = getRowText(1);
+            const secondString = getRowText(2);
+            const statusToSend = isStopSignalActive ? 'stopped' : 'changed';
+
+            await sendDataToUpdateEndpoint(firstString, secondString, statusToSend);
+
+            if (updateStatusMessageDiv.classList.contains('success')) { // Только если отправка успешна
+                if (isStopSignalActive) {
+                    updateStatusMessageDiv.textContent = "Текст отправлен (статус 'stopped'). Дисплей остается на паузе (Режим СТОП активен).";
+                    // Поля не очищаем, т.к. Режим СТОП активен, пользователь может захотеть их отредактировать
+                } else {
+                    updateStatusMessageDiv.textContent = "Текст отправлен (статус 'changed'). Дисплей обновится.";
+                    // Очищаем поля, т.к. Режим СТОП не активен и текст успешно отправлен
+                    for (let r = 1; r <= 2; r++) {
+                        for (let c = 0; c < 16; c++) {
+                            document.getElementById(`input-r${r}-c${c}`).value = '';
+                        }
+                    }
+                    document.getElementById('input-r1-c0').focus();
+                }
+            }
+            // Если была ошибка, sendDataToUpdateEndpoint уже установил сообщение об ошибке
+        });
+
+    </script>
+</body>
+</html>

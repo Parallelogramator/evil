@@ -50,7 +50,7 @@ AUDIO_DEVICE_NAME = None
 # --- Настройки сервера ---
 HOST = "0.0.0.0"
 PORT = 8000
-
+ASSEMBLYAI_API_KEY = '8c8a37f147cd4a058d838821c174d75c'
 ADMIN_USERNAME = '9fktk1yhUQGp5xh'
 ADMIN_PASSWORD = 'd5K9tm2nyTHreFr'
 WEBSOCKET_SECRET_KEY = 'SkRt}X–d/;,$GM*–qi(Uz!LG1(#H#ZbfN3c/&y78USiv[MannL}@7_MO=GdF8–k'

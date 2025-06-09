@@ -206,13 +206,29 @@
                         setTimeout(() => updateStatus('Подключено.'), 500);
                    }
                 },
+                // --- НАЧАЛО ИЗМЕНЕНИЙ ---
                 (event) => {
-                    const newText = event.data;
-                    const newP = document.createElement('p');
-                    newP.textContent = newText;
-                    transcriptContainer.appendChild(newP);
-                    transcriptContainer.scrollTop = transcriptContainer.scrollHeight;
+                    try {
+                        // 1. Парсим полученную строку JSON в объект
+                        const data = JSON.parse(event.data);
+
+                        // 2. Проверяем, что это финальный результат
+                        if (data && data.is_final && data.text) {
+                            // 3. Создаем новый параграф и добавляем только текст
+                            const newP = document.createElement('p');
+                            newP.textContent = data.text; // Используем только поле text
+                            transcriptContainer.appendChild(newP);
+
+                            // 4. Прокручиваем контейнер вниз, чтобы видеть последний текст
+                            transcriptContainer.scrollTop = transcriptContainer.scrollHeight;
+                        }
+                        // Если is_final: false, мы просто игнорируем сообщение.
+
+                    } catch (e) {
+                        console.error("Ошибка парсинга JSON от аудио-сокета:", e, "Полученные данные:", event.data);
+                    }
                 },
+                // --- КОНЕЦ ИЗМЕНЕНИЙ ---
                  (event) => { reconnectAttemptsAudio = attempts.count; },
                 (error) => { updateStatus('Ошибка подключения к транскрипции аудио.', true); },
                 attempts

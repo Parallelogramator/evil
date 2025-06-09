@@ -1,190 +1,178 @@
 # streaming/asr.py
-
+import asyncio
 import logging
-import numpy as np
+from typing import Optional, Callable
+
+from assemblyai.streaming.v3 import (
+    StreamingClient,
+    StreamingClientOptions,
+    StreamingError,
+    StreamingEvents,
+    StreamingParameters,
+    TerminationEvent,
+    TurnEvent,
+)
 import config
-from optimum.intel import OVModelForSpeechSeq2Seq # Using OpenVINO optimized class
-from transformers import AutoProcessor
-import openvino as ov
 
-# Configure logging (assuming basic setup elsewhere or use default)
-# logging.basicConfig(level=logging.INFO) # Example basic config
-logger = logging.getLogger(__name__) # Use __name__ for standard practice
+# Настройка логирования
+logger = logging.getLogger(__name__)
 
-# --- Global variables for model and processor ---
-ov_model = None
-processor = None
-model_loaded = False
+# --- Глобальные переменные для управления клиентом ---
+client: Optional[StreamingClient] = None
+# Callback-функция, которую будет вызывать on_turn для возврата текста в основное приложение
+transcription_callback: Optional[Callable[[str, bool], None]] = None
+
+main_event_loop: Optional[asyncio.AbstractEventLoop] = None
+client_initialized = False
+
+
 # ---
 
-def init_asr_model():
-    """
-    Initializes and loads the Whisper ASR model using OpenVINO.
-    Follows the pattern: Load Processor -> Load Model.
-    """
-    global ov_model, processor, model_loaded
+# --- Обработчики событий от AssemblyAI ---
 
-    if model_loaded:
-        logger.info("ASR model already loaded.")
-        return True
+def on_turn(client_instance: StreamingClient, event: TurnEvent):
+    global main_event_loop # Получаем доступ к глобальной переменной
+    transcript = event.transcript
+    is_final = event.end_of_turn
 
-    logger.info(f"Loading Whisper model '{config.WHISPER_MODEL_ID}' for OpenVINO on device '{config.OV_DEVICE}'...")
-    logger.info(f"Model cache directory: {config.OV_CACHE_DIR}")
-
-    try:
-        # --- Optional: Informative OpenVINO device check ---
+    if transcription_callback and transcript and main_event_loop:
+        logger.debug(f"ASR Turn: '{transcript}' (Final: {is_final})")
         try:
-            core = ov.Core()
-            available_devices = core.available_devices
-            logger.info(f"OpenVINO available devices: {available_devices}")
-            if config.OV_DEVICE not in available_devices and config.OV_DEVICE != "AUTO":
-                 logger.warning(f"Specified OV_DEVICE '{config.OV_DEVICE}' not explicitly found in {available_devices}. OpenVINO might fall back or use AUTO behavior.")
-            # NPU Note: Explicit NPU selection might change in future OpenVINO/Optimum versions.
-            # 'AUTO' is generally preferred for portability.
+            # --- ИСПОЛЬЗУЕМ СОХРАНЕННЫЙ ЦИКЛ ---
+            asyncio.run_coroutine_threadsafe(
+                transcription_callback(transcript, is_final),
+                main_event_loop # Передаем сохраненный цикл
+            )
         except Exception as e:
-            logger.error(f"Error during OpenVINO Core check: {e}")
-        # ---
+            # Убираем проверку на RuntimeError, так как main_event_loop уже проверен
+            logger.error(f"Ошибка при вызове callback-функции транскрипции: {e}", exc_info=True)
+    elif not main_event_loop:
+        logger.error("ASR callback failed: main_event_loop was not set during initialization.")
 
-        # Step 1 (Example): Load processor
-        logger.info(f"Loading processor for {config.WHISPER_MODEL_ID}...")
-        processor = AutoProcessor.from_pretrained(
-            config.WHISPER_MODEL_ID,
-            cache_dir=config.OV_CACHE_DIR
-        )
-        logger.info("Processor loaded.")
-
-        # Step 1 (Example): Load model (OpenVINO specific loading/conversion)
-        logger.info(f"Loading/Exporting model {config.WHISPER_MODEL_ID} for OpenVINO...")
-        ov_model = OVModelForSpeechSeq2Seq.from_pretrained(
-            config.WHISPER_MODEL_ID,
-            export=True,          # Export to OpenVINO format if needed
-            device=config.OV_DEVICE,     # Target device (CPU, GPU, AUTO)
-            cache_dir=config.OV_CACHE_DIR, # Cache for downloaded model AND exported model
-            ov_config={"CACHE_DIR": config.OV_CACHE_DIR}, # Cache for compiled model blobs
-            trust_remote_code=True # Allow custom code if present in model repo
-        )
-        # Note: Setting forced_decoder_ids like in the example usually isn't
-        # needed here as language/task are specified during generation.
-        # If needed: ov_model.config.forced_decoder_ids = processor.get_decoder_prompt_ids(language=config.ASR_LANGUAGE, task="transcribe")
-        logger.info("OpenVINO model loaded/exported.")
-
-        # Optional Step: Compile model (can improve first inference latency)
-        # logger.info("Compiling OpenVINO model (this may take a moment)...")
-        # ov_model.compile() # This happens implicitly on first generate() if not called explicitly
-        # logger.info("OpenVINO model compiled.")
-
-        logger.info("OpenVINO Whisper model and processor initialized successfully.")
-        model_loaded = True
-        return True
-
-    except ImportError as e:
-         logger.error(f"ImportError loading model: {e}. Ensure required packages are installed (e.g., optimum[openvino], transformers, etc.)")
-         model_loaded = False
-    except Exception as e:
-        logger.error(f"Failed to load OpenVINO Whisper model: {e}", exc_info=True)
-        logger.error("Check model ID, network connection, cache directory permissions, and OpenVINO installation.")
-        model_loaded = False
-
-    return False
+def on_error(client_instance: StreamingClient, error: StreamingError): # <-- Добавьте и сюда для единообразия
+    """Вызывается при ошибке в потоке."""
+    logger.error(f"Произошла ошибка в AssemblyAI: {error}")
 
 
-def transcribe_audio(audio_data: np.ndarray) -> str:
+def on_terminated(client_instance: StreamingClient, event: TerminationEvent): # <-- И сюда
+    """Вызывается при завершении сессии."""
+    logger.info(
+        f"Сессия AssemblyAI завершена. Обработано аудио: {event.audio_duration_seconds} секунд."
+    )
+
+
+
+# --- Функции управления клиентом (API этого модуля) ---
+
+def init_asr_client(callback: Callable[[str, bool], None], loop: asyncio.AbstractEventLoop):
     """
-    Performs speech recognition on the provided audio data using the loaded OpenVINO model.
-    Follows the pattern: Preprocess Data -> Generate Tokens -> Decode Tokens.
+    Инициализирует клиент AssemblyAI, но не подключается.
+    Заменяет вашу старую функцию init_asr_model().
 
     Args:
-        audio_data: A numpy array containing the audio waveform (mono).
-
-    Returns:
-        The recognized text string, or an empty string if an error occurs or the model isn't loaded.
+        callback: Функция, которая будет вызываться с распознанным текстом.
+                  Принимает два аргумента:
+                  - text (str): Распознанный текст.
+                  - is_final (bool): True, если это конец фразы.
     """
-    global ov_model, processor # Use the globally loaded model/processor
+    global client, transcription_callback, client_initialized, main_event_loop
 
-    if not model_loaded or ov_model is None or processor is None:
-        logger.error("ASR model not initialized. Call init_asr_model() first.")
-        return ""
+    if client_initialized:
+        logger.info("ASR клиент AssemblyAI уже инициализирован.")
+        return True
 
-    if not isinstance(audio_data, np.ndarray) or audio_data.size == 0:
-        logger.warning("Received invalid or empty audio data for transcription.")
-        return ""
+    logger.info("Инициализация клиента AssemblyAI...")
+
+    if not config.ASSEMBLYAI_API_KEY or "YOUR_ASSEMBLYAI_API_KEY" in config.ASSEMBLYAI_API_KEY:
+        logger.error("API-ключ AssemblyAI не найден или не изменен в config.py.")
+        return False
+
+    # Сохраняем callback-функцию для использования в on_turn
+    transcription_callback = callback
+    main_event_loop = loop
 
     try:
-        # Step 2 (Example): Preprocess Data (Extract features)
-        # Ensure audio is float32, which Whisper models expect
-        if audio_data.dtype != np.float32:
-             audio_data = audio_data.astype(np.float32)
-             # Optional: Normalize if needed (processor usually handles this)
-             # if np.max(np.abs(audio_data)) > 1.0:
-             #     audio_data /= np.max(np.abs(audio_data))
-
-        inputs = processor(
-            audio=audio_data,
-            sampling_rate=config.SAMPLE_RATE, # Use configured sample rate
-            return_tensors="pt"               # Return PyTorch tensors
+        # Создаем экземпляр клиента
+        client = StreamingClient(
+            StreamingClientOptions(api_key=config.ASSEMBLYAI_API_KEY)
         )
-        input_features = inputs.input_features # Get the features needed by the model
 
-        # Step 3 (Example): Generate Token IDs (Inference)
-        # Prepare generation arguments
-        generate_kwargs = {
-            "language": config.ASR_LANGUAGE, # Specify target language
-            "task": "transcribe",            # Specify task
-            # Add other generation config from your config file if needed
-            # e.g., "max_new_tokens": 128,
-        }
+        # Регистрируем наши обработчики событий
+        client.on(StreamingEvents.Turn, on_turn)
+        client.on(StreamingEvents.Error, on_error)
+        client.on(StreamingEvents.Termination, on_terminated)
 
-        # VAD Note: Internal VAD options like in faster-whisper might not be directly
-        # available or work the same way in Optimum/OpenVINO's generate method.
-        # External VAD before calling transcribe_audio is often more reliable.
-        # if config.USE_VAD_FILTER:
-        #    logger.warning("Internal VAD filter in generate() might not be supported by Optimum/OV.")
-            # generate_kwargs["vad_filter"] = True # Check Optimum documentation for support
-
-        predicted_ids = ov_model.generate(input_features, **generate_kwargs)
-
-        # Step 4 (Example): Decode Token IDs to Text
-        # Use batch_decode even for single items, select the first result [0]
-        transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
-
-        # Clean up potential leading/trailing whitespace
-        return transcription.strip()
+        logger.info("Клиент AssemblyAI успешно инициализирован.")
+        client_initialized = True
+        return True
 
     except Exception as e:
-        logger.error(f"Error during OpenVINO Whisper transcription: {e}", exc_info=True)
-        return ""
+        logger.error(f"Не удалось инициализировать клиент AssemblyAI: {e}", exc_info=True)
+        client_initialized = False
+        return False
 
-# Example Usage (optional, for testing the module directly)
-# if __name__ == '__main__':
-#     # Configure logging for standalone run
-#     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-#
-#     # Make sure config.py has defaults set
-#     class MockConfig:
-#         WHISPER_MODEL_ID = "openai/whisper-tiny" # Use a small model for quick testing
-#         OV_DEVICE = "CPU" # Or "AUTO", "GPU"
-#         OV_CACHE_DIR = "./model_cache" # Ensure this directory exists or can be created
-#         SAMPLE_RATE = 16000
-#         ASR_LANGUAGE = "english" # Or the language you expect
-#         USE_VAD_FILTER = False # Keep VAD related stuff off unless specifically tested
-#
-#     config = MockConfig()
-#
-#     # Create dummy audio (e.g., 5 seconds of silence or sine wave)
-#     sr = config.SAMPLE_RATE
-#     duration = 5
-#     dummy_audio = np.sin(2 * np.pi * 440.0 * np.arange(sr * duration) / sr).astype(np.float32)
-#     # Or load a real audio file:
-#     # from datasets import load_dataset
-#     # ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
-#     # sample = ds[0]["audio"]
-#     # dummy_audio = sample["array"]
-#     # config.SAMPLE_RATE = sample["sampling_rate"] # Important: Use actual sample rate
-#
-#     logger.info("Initializing ASR model...")
-#     if init_asr_model():
-#         logger.info("Model initialized. Transcribing dummy audio...")
-#         result = transcribe_audio(dummy_audio)
-#         logger.info(f"Transcription result: '{result}'")
-#     else:
-#         logger.error("Failed to initialize ASR model.")
+
+def start_streaming_session():
+    """
+    Подключается к AssemblyAI и начинает сессию потокового распознавания.
+    """
+    if not client:
+        logger.error("Клиент не инициализирован. Сначала вызовите init_asr_client().")
+        return
+
+    logger.info(
+        f"Подключение к AssemblyAI с параметрами: sample_rate={config.SAMPLE_RATE}, language={config.ASR_LANGUAGE}")
+    try:
+        # Подключаемся с параметрами из конфига
+        client.connect(
+            StreamingParameters(
+                sample_rate=config.SAMPLE_RATE,
+                language_code=config.ASR_LANGUAGE,
+            )
+        )
+        logger.info("Успешное подключение к AssemblyAI. Сессия стриминга активна.")
+    except Exception as e:
+        logger.error(f"Ошибка подключения к AssemblyAI: {e}", exc_info=True)
+
+
+def stream_audio_chunk(audio_chunk: bytes):
+    """
+    Отправляет фрагмент аудио (в байтах) в AssemblyAI для распознавания.
+    Эта функция заменяет ваш старый transcribe_audio.
+
+    Args:
+        audio_chunk: Фрагмент аудио в формате "сырых" байтов (raw bytes).
+                     Например, данные, полученные из микрофона.
+    """
+    if not client:
+        logger.warning("Попытка отправить аудио, но клиент не подключен.")
+        return
+
+    try:
+        client.stream(audio_chunk)
+    except Exception as e:
+        logger.error(f"Ошибка при отправке аудио в AssemblyAI: {e}")
+
+
+def stop_streaming_session():
+    """
+    Отключается от AssemblyAI и завершает сессию.
+    """
+    global client, client_initialized, transcription_callback, main_event_loop
+    if not client:
+        return
+
+    logger.info("Завершение сессии стриминга AssemblyAI...")
+    try:
+        client.disconnect(terminate=True)
+    except Exception as e:
+        logger.error(f"Ошибка при отключении от AssemblyAI: {e}")
+    finally:
+        # Сбрасываем состояние
+        client = None
+        client_initialized = False
+        transcription_callback = None
+        main_event_loop = None
+        logger.info("Сессия AssemblyAI остановлена и ресурсы очищены.")
+
+

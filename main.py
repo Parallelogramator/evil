@@ -47,35 +47,21 @@ async def lifespan(app: FastAPI):
     logger.info("Lifespan: Starting up...")
     lifespan.background_tasks = set()
 
-    # 1. Инициализация ASR модели
-    if not asr.init_asr_model():
-        logger.error("ASR model failed to load. Audio transcription will be unavailable.")
-
-    if asr.model_loaded:
-        audio_processing_task = asyncio.create_task(audio.process_audio_and_stream_text())
-        lifespan.background_tasks.add(audio_processing_task)
-        audio_processing_task.add_done_callback(lifespan.background_tasks.discard)
-        logger.info("Audio processing task scheduled.")
-    else:
-        logger.warning("Audio processing task NOT scheduled because ASR model failed to load.")
-
-    # Убрали запуск задачи захвата видео - она больше не нужна на сервере
-    # Убрали запуск захвата аудио - он тоже не нужен на сервере
-
     logger.info("Lifespan: Startup complete.")
 
     yield # Приложение работает здесь
 
-    logger.info("Lifespan: Shutting down...")
-    # 1. Остановка фоновых задач (осталась только обработка аудио)
-    logger.info(f"Cancelling {len(lifespan.background_tasks)} background tasks...")
-    tasks_to_cancel = list(lifespan.background_tasks)
-    for task in tasks_to_cancel:
-        if not task.done():
-            task.cancel()
-    if tasks_to_cancel:
-        await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-    logger.info("Background tasks cancelled.")
+    if hasattr(lifespan, "background_tasks") and lifespan.background_tasks:
+        logger.info("Lifespan: Shutting down...")
+        # 1. Остановка фоновых задач (осталась только обработка аудио)
+        logger.info(f"Cancelling {len(lifespan.background_tasks)} background tasks...")
+        tasks_to_cancel = list(lifespan.background_tasks)
+        for task in tasks_to_cancel:
+            if not task.done():
+                task.cancel()
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        logger.info("Background tasks cancelled.")
 
     # Убрали остановку аудио захвата
     logger.info("Lifespan: Shutdown complete.")
